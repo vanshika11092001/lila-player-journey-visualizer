@@ -2,7 +2,7 @@
 
 A browser-based analytics tool for the Level Design team to explore player behavior across LILA BLACK's extraction maps. Built for the LILA APM Written Test.
 
-**Live demo:** `https://lila-player-viz.vercel.app` ← replace with your deployed URL
+**Live demo:** `https://lila-player-journey-visualizer-app.vercel.app
 
 ---
 
