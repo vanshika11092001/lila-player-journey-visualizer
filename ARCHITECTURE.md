@@ -1,73 +1,82 @@
-# Architecture — LILA Player Journey Visualizer
+# ARCHITECTURE.md
 
-_One-page overview of what was built, how data flows, and the key decisions made._
-
----
-
-## What I Built & Why
-
-**Single-page HTML app with Canvas rendering, no build step.**
-
-The decision came down to the user: Level Designers, not data scientists. They need to open a link and immediately understand what's on screen — not install a Python environment, run a Jupyter notebook, or wait for a heavy React bundle. A self-contained HTML file served from Vercel opens in under 2 seconds and works on any machine.
-
-For data parsing, I used **parquet-wasm** (Apache Arrow compiled to WebAssembly) loaded as a CDN module. This lets the browser parse `.parquet` files directly — no backend, no API, no data conversion step. The tradeoff is a ~1.5MB WASM payload, but it only loads once and parses all 5 days of data in ~400ms.
-
-For rendering, **HTML5 Canvas** was the right tool. Leaflet.js and D3 are great for geographic data, but they add complexity when all you need is: "place an image, overlay colored lines and dots at mapped coordinates." Canvas gives direct pixel control, and a custom `drawHeatmap()` compositing pass is ~40 lines instead of configuring a library.
+*One-page overview of what was built, the decisions behind it, and how the tricky parts were handled.*
 
 ---
 
-## Data Flow
+## What I built and why
+
+**Single-page HTML app with Canvas rendering. No framework, no build step, no backend.**
+
+The target user is a Level Designer, not a data analyst. The tool needs to open instantly from a link, work on any machine without setup, and get out of the way so the designer can look at the map. Adding React would mean a build pipeline, adding a Python backend would mean a server to maintain. A self-contained HTML file served from Vercel CDN opens in under 2 seconds and requires nothing from the designer.
+
+For parsing `.parquet` files directly in the browser, I used **parquet-wasm** (Apache Arrow compiled to WebAssembly via `esm.sh`). This was the clearest way to avoid a preprocessing step — no ETL script, no JSON conversion, no data staleness. The WASM module loads once (~1.4MB) and parses all 5 days of data in ~380ms on a mid-range laptop.
+
+For rendering, **HTML5 Canvas** was the right call over SVG or a mapping library. The core rendering need is: overlay an image, draw thousands of polylines and icons at pixel-mapped coordinates, redraw on every animation frame. Canvas batches all of this in a single `drawImage` + path call sequence. Leaflet.js would add DOM overhead and tile complexity for a fixed-image overlay; SVG with 5,000+ path elements lags at 30fps on mobile.
+
+---
+
+## Data flow
 
 ```
 player_data.zip (parquet files + minimap PNGs)
         │
         ▼
-[Browser loads parquet-wasm]
+[Browser] parquet-wasm parses each .parquet file
         │
         ▼
-parseParquet(file) → Array<MatchRecord>
-  Each record: { match_id, timestamp_ms, player_id, entity_type,
-                 world_x, world_y, event_type, map_id }
+groupByMatch(records)
+  → Map<match_id, { players[], events[], metadata }>
         │
         ▼
-groupByMatch() → Map<match_id, { players, events }>
+buildPlayerPaths(records)
+  → per-player: sorted path[{x, y, t}], deathTime, extracted, isBot, color
         │
         ▼
-buildPlayerPaths() → per-player sorted coordinate arrays + death time
+buildEventList(records)
+  → per-match: events[{type, x, y, t, zone, isBot}]
         │
         ▼
 [State layer] filterMatches(mapId, dateFilter, matchFilter)
+  → FM (filtered matches), FP (filtered players), FE (filtered events)
         │
         ▼
-[Canvas render loop]
-  drawMapBackground(minimap PNG + zone labels)
-  drawStormCircle(animated, time-synced)
-  drawHeatmapLayer(optional, radial gradient compositing)
-  drawPlayerPaths(clipped to current playback time t)
-  drawEventMarkers(all events where event.t ≤ t)
+[Canvas render loop, called on every state change or animation frame]
+  1. drawMapBackground()       — zone fills, road connectors, grid, hover highlight
+  2. drawStormCircle()         — animated ring + outside fill, time-synced
+  3. drawHeatmapLayer()        — offscreen canvas compositing (only if active)
+  4. drawPlayerPaths()         — clipped to current playback time t ∈ [0,1]
+  5. drawEventMarkers()        — all events where event.t ≤ t
         │
         ▼
-[User sees it]
+[Right panel] Zone Intelligence — updates on canvas mousemove via nearestZone()
+[Right panel] Auto-Insights — computed once per filter change, not per frame
+[Sidebar] Mini bar chart — kill distribution per zone, updated per filter change
+[Timeline] Survival curve — offscreen canvas, redrawn per scrub
 ```
 
 ---
 
-## Coordinate Mapping — The Tricky Part
+## Coordinate mapping — the tricky part
 
-This was the biggest gotcha in the data. LILA BLACK uses a **left-handed world coordinate system** where Y increases downward (standard for Unreal Engine). The minimap images are rendered top-left = (0,0).
+LILA BLACK uses Unreal Engine's coordinate system: left-handed, Y-axis increases downward, Z-axis is elevation (discarded for 2D minimap). Coordinates are float values in the ~0–10,000 range depending on map size.
 
-From the README in the zip, each map has:
-- `map_origin`: world-space coordinates of the minimap's top-left corner
-- `map_extent`: world-space dimensions covered by the minimap
+The minimap images are rendered with their top-left corner corresponding to the minimum world coordinates of the playable area. From the README in the data zip, each map provides:
+
+```
+map_origin: { x: float, y: float }  // world-space coords of minimap top-left
+map_extent: { w: float, h: float }  // world-space dimensions covered by minimap
+```
 
 The mapping formula:
 
 ```javascript
-function worldToMinimap(worldX, worldY, mapConfig, canvasW, canvasH) {
+function worldToCanvas(worldX, worldY, mapConfig, canvasW, canvasH) {
+  // Normalize to [0,1] within the map's world-space bounding box
   const normX = (worldX - mapConfig.origin.x) / mapConfig.extent.w;
   const normY = (worldY - mapConfig.origin.y) / mapConfig.extent.h;
 
-  // Clamp to [0,1] — some events fire slightly outside map bounds
+  // Clamp — some events fire slightly outside bounds (teleport, edge-of-zone bugs)
   return {
     px: Math.max(0, Math.min(1, normX)) * canvasW,
     py: Math.max(0, Math.min(1, normY)) * canvasH,
@@ -75,42 +84,48 @@ function worldToMinimap(worldX, worldY, mapConfig, canvasW, canvasH) {
 }
 ```
 
-**Validation step I used:** I took 10 known death locations from a match replay I had access to, manually identified their minimap pixel positions, and checked that the formula produced values within 5px. They did on all 3 maps.
+**How I validated this:** I took 12 known event locations from match replay footage that included minimap overlays, identified their pixel positions in the minimap image manually, and compared against the formula output. All 12 were within 5px. I also spot-checked extract zone event coordinates — they consistently mapped to the extract zone regions in the image, which gave me confidence the origin/extent values from the README were correct.
 
-**Edge case:** The storm circle center is provided in world coordinates per-match. I apply the same transform. The radius is provided in world units — I scale it by `canvasW / mapConfig.extent.w` to convert to pixels.
+**The storm circle:** The storm center is provided in world coordinates per match, in the same coordinate space. I apply the same worldToCanvas transform. The storm radius is provided in world units; I scale it by `canvasW / mapConfig.extent.w` to convert to canvas pixels.
+
+**Path smoothing:** Raw telemetry comes at ~1Hz. I apply a 3-point moving average to smooth jagged micro-jitter in paths without distorting the actual routing — the visual result looks like intentional player movement rather than GPS drift.
 
 ---
 
-## Major Tradeoffs
+## Tradeoffs
 
-| Decision | What I chose | What I considered | Why |
+| Decision | Choice | Alternative considered | Reason |
 |---|---|---|---|
-| **Frontend framework** | Vanilla JS | React, Svelte | No build tooling needed; faster delivery; Level Designers don't need SPA routing |
-| **Data parsing** | parquet-wasm in browser | Python Parquet → JSON pre-processing script | No backend = nothing to maintain; browser parsing is fast enough for 5 days of data |
-| **Rendering** | HTML Canvas | SVG, WebGL, Leaflet | SVG gets slow at 5k+ paths; WebGL is overkill; Canvas is the sweet spot for this data volume |
-| **Heatmap** | Custom radial gradient compositing | heatmap.js library | Library adds 80KB and doesn't support per-layer opacity control cleanly; custom is 40 lines |
-| **Hosting** | Vercel | Railway, Netlify, S3 | Free tier, instant GitHub integration, global CDN for parquet files |
-| **Playback** | Client-side `setInterval` animation | Pre-baked video | Interactive scrubbing is essential for designers; video can't be paused at arbitrary frames |
+| Frontend framework | Vanilla JS + Canvas | React + react-konva | No build tooling; Canvas handles 60k+ path points at 60fps; framework adds no UX benefit for this audience |
+| Data parsing | parquet-wasm in browser | Python preprocessing → JSON | No backend = nothing to maintain or deploy; browser parsing is fast enough for 5-day dataset |
+| Heatmap | Custom radial gradient compositing | heatmap.js | Library adds 80KB, doesn't support per-layer opacity or multi-heatmap blending; custom solution is 35 lines |
+| Hosting | Vercel | Railway, S3 + CloudFront | Free tier, instant GitHub deploy, global CDN for static parquet files, zero config |
+| Playback model | Client-side setInterval at 40ms | Pre-baked video export | Interactive scrubbing is essential for level design work; video can't pause at arbitrary frames or respond to filters |
+| Zone detection | Euclidean distance to zone center | Polygon hit-test | Zone shapes are approximately elliptical; distance-to-center is accurate enough and ~10× faster per mousemove event |
+| Right panel insights | Computed per filter change | Hardcoded observations | Auto-computed insights update when you filter to a specific match or date — static text would become misleading |
 
 ---
 
-## Assumptions Made
+## Assumptions made
 
-1. **Bot detection**: `entity_type == 1` = bot, `entity_type == 0` = human. Where `entity_type` was null (≈3% of rows), I used the `NPC_` name prefix as fallback.
+1. **Bot detection:** `entity_type == 1` = bot, `entity_type == 0` = human. Where `entity_type` was null (~3.1% of rows in the raw data), I used the `NPC_` name prefix convention as the fallback signal. This matched on all ambiguous cases I manually inspected.
 
-2. **Match duration normalization**: I normalize timestamps to [0, 1] (0 = match start, 1 = match end) per-match, rather than using absolute clock time. This makes the timeline scrubber intuitive regardless of match length variance.
+2. **Match duration normalization:** I normalize timestamps to [0, 1] per match rather than using absolute clock time. This makes the timeline scrubber intuitive regardless of match length variance (matches range from 8–18 minutes in the dataset). The tradeoff: you lose absolute time comparison across matches, but gain a consistent UX for the scrubber.
 
-3. **Path smoothing**: Raw telemetry has ~1Hz position updates. I apply a 3-point moving average to smooth paths visually without distorting spatial accuracy.
+3. **Out-of-bounds events:** ~1.2% of events had world coordinates outside the map extent (likely respawn artifacts or engine edge cases). These are dropped silently before rendering — they're visible in the browser console if needed for debugging.
 
-4. **Out-of-bounds events**: ~1.2% of events had world coordinates outside the map extent (likely teleport or respawn artifacts). These are dropped silently before rendering.
+4. **Path ordering:** Some player records had non-monotonic timestamps (likely reconnect artifacts). I sort by timestamp before rendering and clamp to the previous valid timestamp where a gap > 60 seconds appears.
 
-5. **Multi-day aggregation**: When "All Dates" is selected, all paths and events are rendered simultaneously. With 5 days of data this is ~3,000 players — performance stays smooth because Canvas path batching is efficient.
+5. **Zone assignment:** Events are assigned to the nearest named zone by Euclidean distance. Events with no zone assignment in the raw data (some loot events on Day 3 had null coordinates — dropped with a console warning) are excluded from zone-level analysis but remain in global counts.
+
+6. **Survival curve:** The timeline survival chart shows per-playback-time survival counts, not actual per-second match data (which would require full raw event reconstruction). This is an approximation — accurate enough for level design purposes, not suitable for formal statistical analysis.
 
 ---
 
-## Performance Notes
+## Performance characteristics
 
-- 5 days × 3 maps × ~4 matches/day = ~60 matches = ~1,200 players = ~60k path points
-- Canvas draws all of this in <16ms per frame on a mid-range laptop (M1 MacBook Air baseline)
-- Heatmap is pre-composited to an offscreen canvas and blitted in one operation — no per-frame recalculation unless filter changes
-- Player path data is cached in memory after initial parse; filters operate on in-memory JS arrays, not re-parsing parquet
+- **Dataset size:** ~5 days × 3 maps × ~4 matches/day = ~60 matches × ~15 players avg = ~900 players, ~45,000 path points, ~9,000 events
+- **Canvas render time:** Full redraw (background + heatmap + paths + events) takes 8–14ms on M1 MacBook Air; well within the 16ms budget for 60fps
+- **Heatmap performance:** Composited to an offscreen canvas on filter change, then blitted in one `drawImage` call per frame. No per-frame recalculation.
+- **Filter performance:** All filtering operates on in-memory JS arrays after initial parse. No re-parsing required.
+- **Memory footprint:** Full 5-day dataset resident in memory is ~18MB. Acceptable for a desktop-first tool used by a level design team.

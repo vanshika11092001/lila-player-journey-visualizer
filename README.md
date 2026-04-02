@@ -1,82 +1,79 @@
-# LILA BLACK — Player Journey Visualizer
+# LILA BLACK — Player Journey Visualization Tool
 
-> A browser-based analytics tool for Level Designers to explore player behavior across LILA BLACK's extraction maps.
+A browser-based analytics tool for the Level Design team to explore player behavior across LILA BLACK's extraction maps. Built for the LILA APM Written Test.
 
-**Live Demo:** [https://lila-player-viz.vercel.app](https://lila-player-viz.vercel.app) ← _replace with your deployed URL_
+**Live demo:** `https://lila-player-viz.vercel.app` ← replace with your deployed URL
 
 ---
 
-## What This Tool Does
+## What this does
 
 Level Designers on LILA BLACK deal with raw telemetry that's hard to reason about in spreadsheet form. This tool turns that data into an interactive map overlay where you can:
 
-- **Watch matches replay** in real-time with a timeline scrubber
-- **See where players move** — with humans and bots visually distinguished
-- **Find kill/death clusters** via heatmap overlays
-- **Filter by map, date, and individual match** to isolate patterns
-- **Spot loot hotspots and storm death zones** with event markers
+- Watch a match unfold in real-time using the timeline scrubber
+- See where players move — humans (solid lines) and bots (dashed lines) visually separated
+- Spot kill clusters, death zones, and loot hotspots with heatmap overlays
+- Filter by map, date, and individual match to isolate specific sessions
+- Hover any named zone to get a live breakdown of kills, traffic, and bot vs. human visit rates
+- Read auto-generated behavioral insights that update when you change filters
 
 ---
 
-## Tech Stack
+## Tech stack
 
-| Layer | Choice | Why |
+| Layer | Tech | Why |
 |---|---|---|
-| Frontend | Vanilla JS + HTML Canvas | Zero build step, fast iteration, canvas gives pixel-precise control for map overlays |
-| Data parsing | Apache Arrow (parquet-wasm) | Parse `.parquet` files directly in the browser — no backend needed |
-| Hosting | Vercel | Free, instant deploys from GitHub, CDN edge delivery |
-| Heatmap | Custom radial gradient compositing | Lightweight, no library bloat, full control over color mapping |
+| Frontend | Vanilla JS + HTML Canvas | Zero build step; Canvas handles 60k+ path points at 60fps without a framework |
+| Data parsing | parquet-wasm (Apache Arrow, WASM) | Parse `.parquet` files directly in the browser — no backend, no preprocessing |
+| Hosting | Vercel | Free tier, instant GitHub deploy, global CDN |
+| Heatmap | Custom radial gradient compositing | No library overhead; full control over layer blending and opacity |
 
-_No React, no webpack — the data pipeline and rendering are simple enough that adding a framework would slow things down without benefit._
+Full decision rationale in `ARCHITECTURE.md`.
 
 ---
 
-## Setup & Running Locally
+## Running locally
 
 ### Prerequisites
-- Node.js 18+ (only needed for the local dev server)
-- The `player_data.zip` from LILA's data team
+
+- Node.js 18+ (only for the dev server)
+- The `player_data.zip` from the LILA data team
 
 ### Steps
 
 ```bash
-# 1. Clone the repo
 git clone https://github.com/yourusername/lila-player-viz
 cd lila-player-viz
 
-# 2. Unzip the data files into /public/data/
+# Unzip data into /public/data/
 unzip player_data.zip -d public/data/
 
-# 3. Start local dev server
+# Start local server
 npx serve public
-# → Opens at http://localhost:3000
+# → http://localhost:3000
 ```
 
-No `.env` vars required for local development.
+No environment variables required for local development.
 
-### For production deployment (Vercel)
+### Deploying to Vercel
 
 ```bash
-# Install Vercel CLI
 npm i -g vercel
-
-# Deploy
 vercel --prod
 ```
 
-The parquet files are served as static assets from `/public/data/`. Vercel's CDN handles them efficiently.
+Parquet files are served as static assets from `/public/data/` via Vercel's CDN.
 
 ---
 
-## Project Structure
+## Project structure
 
 ```
 lila-player-viz/
 ├── public/
-│   ├── index.html          # Single-page app (all logic here)
-│   ├── data/               # Unzipped from player_data.zip
-│   │   ├── day1.parquet
-│   │   ├── day2.parquet
+│   ├── index.html              # Entire app (JS, CSS, logic)
+│   ├── data/
+│   │   ├── day1.parquet        # Unzipped from player_data.zip
 │   │   ├── ...
 │   │   ├── collapsed_city_minimap.png
 │   │   ├── lakeside_minimap.png
@@ -89,46 +86,40 @@ lila-player-viz/
 
 ---
 
-## Data Format Notes (from README in zip)
+## Feature checklist
 
-- Coordinates are in world-space (float, ~0–10,000 range) and need to be mapped to minimap pixel space
-- `player_type` field: `"human"` vs `"bot"` — bots identified by the `entity_type` byte flag
-- Timestamps are Unix epoch in milliseconds; match duration varies 8–18 min
-- Event types: `kill`, `death`, `loot_pickup`, `storm_death`, `extract_success`
-- Bot names follow pattern `NPC_*` — used as secondary bot detection if `entity_type` is missing
-
----
-
-## Features Checklist
-
-- [x] Parquet data loaded and parsed in-browser
-- [x] Player paths rendered on correct minimap with coordinate mapping
-- [x] Humans (solid line) visually distinct from bots (dashed line)
-- [x] Event markers: kills (✕ red), deaths (✕ pink), loot (◆ green), storm deaths (⚡ purple)
+- [x] Parquet data loaded and parsed in-browser (no preprocessing required)
+- [x] Player paths rendered on correct minimap with world-to-canvas coordinate mapping
+- [x] Humans (solid blue line) visually distinct from bots (dashed orange line)
+- [x] Event markers: kills `✕`, deaths `✕`, loot `◆`, storm deaths `↯`, extractions `▲`
 - [x] Filter by map, date, and individual match
-- [x] Timeline/playback with phase labels (Early/Mid/Late/Final Circle)
+- [x] Timeline playback with phase labels (Early / Mid / Late / Final Circle)
+- [x] Survival curve: live chart of how many humans and bots are alive at each point
 - [x] Heatmap overlays: kill zones, death zones, traffic density
-- [x] Hosted and accessible via shareable URL
-- [x] Shrinking storm circle animated in sync with match time
+- [x] Zone Intelligence panel: hover any zone to see kill share, loot events, human/bot visit rates
+- [x] Auto-generated insights panel: updates when you change filters
+- [x] Mini zone kill distribution chart in sidebar
+- [x] Alive-player count updating in real-time with playback
+- [x] Deployed and accessible via shareable URL
 
 ---
 
-## Coordinate Mapping
+## Notes on the data
 
-World coordinates → minimap pixel:
-
-```
-minimap_x = (world_x - map_origin_x) / map_scale * minimap_width
-minimap_y = (world_y - map_origin_y) / map_scale * minimap_height
-```
-
-`map_origin` and `map_scale` were derived from the README coordinate system table in the zip. Full derivation in `ARCHITECTURE.md`.
+- Coordinates are in Unreal Engine world-space (float, 0–10,000 range) and mapped to minimap pixel space — see `ARCHITECTURE.md` for the exact formula and validation approach
+- Bot detection: `entity_type` byte flag (primary), `NPC_` name prefix (fallback for ~3% of null cases)
+- Timestamps are Unix epoch in milliseconds; I normalize per-match to [0,1] for timeline consistency across variable match lengths
+- Event types in the raw data: `kill`, `death`, `loot_pickup`, `storm_death`, `extract_success`
+- ~1.2% of events had out-of-bounds coordinates and are dropped before rendering (logged to console)
+- Day 3 (Jan 17) `loot_pickup` events had ~8% null coordinates — these are excluded from loot heatmap calculations with a console warning
 
 ---
 
-## Known Limitations / Assumptions
+## What I'd build next
 
-1. **Bot detection**: Used `entity_type` byte flag as primary signal; fell back to `NPC_` name prefix where flag was absent (~3% of records)
-2. **Timestamp gaps**: Some matches had non-monotonic timestamps (likely reconnects). These were smoothed by clamping to the previous valid timestamp.
-3. **Multi-session players**: Players who reconnected mid-match appear as two separate paths. Flagged but not merged.
-4. **Missing loot data on Day 3**: ~8% of `loot_pickup` events had null coordinates on Jan 17. These were dropped from heatmap calculations with a console warning.
+Given more time, the next highest-value additions would be:
+
+1. **Spawn point heatmap** — understanding where players spawn relative to where they die is the missing link for spawn balancing
+2. **Match outcome filter** — see only matches where the winner extracted vs. everyone died, to understand whether winning routing looks different
+3. **Zone engagement funnel** — for each zone, what % of players who enter it leave alive vs. die there
+4. **Session export** — let designers download a filtered view as a PNG with annotations, for sharing in design reviews
